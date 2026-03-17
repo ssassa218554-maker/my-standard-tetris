@@ -320,21 +320,117 @@ def render_board_html(board: List[List[str]]) -> str:
     """
 
 
+def render_touch_zones_html() -> str:
+    # Fixed bottom touch bar: left(30%) / mid(40%) / right(30%)
+    # Use links that set query params; Streamlit reruns on navigation.
+    return """
+    <style>
+      :root{
+        --tz-h: 42vh;
+        --tz-bg: rgba(255,255,255,0.04);
+        --tz-border: rgba(255,255,255,0.08);
+        --tz-text: rgba(255,255,255,0.35);
+      }
+      .touchbar-spacer { height: var(--tz-h); }
+      .touchbar {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: var(--tz-h);
+        z-index: 999;
+        display: flex;
+        gap: 0px;
+        padding: 8px 10px 12px 10px;
+        box-sizing: border-box;
+        background: linear-gradient(to top, rgba(0,0,0,0.35), rgba(0,0,0,0.02));
+        -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
+      }
+      .zone {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-decoration: none;
+        border-radius: 16px;
+        border: 1px solid var(--tz-border);
+        background: var(--tz-bg);
+        color: var(--tz-text);
+        font-size: 18px;
+        font-weight: 600;
+        user-select: none;
+        -webkit-user-select: none;
+        width: 100%;
+      }
+      .zone:active {
+        background: rgba(255,255,255,0.09);
+        border-color: rgba(255,255,255,0.16);
+        color: rgba(255,255,255,0.55);
+      }
+      .zone.left  { flex: 3; }
+      .zone.mid   { flex: 4; }
+      .zone.right { flex: 3; }
+      @media (prefers-color-scheme: light) {
+        :root{
+          --tz-bg: rgba(0,0,0,0.035);
+          --tz-border: rgba(0,0,0,0.08);
+          --tz-text: rgba(0,0,0,0.35);
+        }
+        .touchbar { background: linear-gradient(to top, rgba(255,255,255,0.55), rgba(255,255,255,0.02)); }
+      }
+    </style>
+
+    <div class="touchbar" role="group" aria-label="tetris touch controls">
+      <a class="zone left" href="?a=l" aria-label="move left">왼쪽</a>
+      <a class="zone mid" href="?a=rot" aria-label="rotate">회전</a>
+      <a class="zone right" href="?a=r" aria-label="move right">오른쪽</a>
+    </div>
+    <div class="touchbar-spacer"></div>
+    """
+
+
+def apply_query_action() -> None:
+    # Handle one-tap actions coming from the touch zones.
+    try:
+        a = st.query_params.get("a")
+    except Exception:  # pragma: no cover
+        a = None
+
+    if isinstance(a, list):
+        a = a[0] if a else None
+
+    if not a:
+        return
+
+    ss = st.session_state
+    if ss.game_over or ss.paused:
+        # Still clear so taps don't "queue up"
+        try:
+            st.query_params.clear()
+        except Exception:  # pragma: no cover
+            pass
+        return
+
+    if a == "l":
+        try_move(-1, 0)
+    elif a == "r":
+        try_move(1, 0)
+    elif a == "rot":
+        try_rotate()
+
+    # Clear params to prevent repeating action on autorefresh reruns.
+    try:
+        st.query_params.clear()
+    except Exception:  # pragma: no cover
+        pass
+
+
 def big_controls_css() -> None:
     st.markdown(
         """
         <style>
-          /* Make buttons big & tappable on mobile */
-          div[data-testid="stButton"] > button {
-            width: 100%;
-            min-height: 56px;
-            font-size: 18px;
-            border-radius: 14px;
-          }
-          /* Tighten vertical whitespace */
-          .block-container { padding-top: 1.0rem; padding-bottom: 5.5rem; }
-          /* Keep controls visible lower; note: Streamlit columns live in normal flow,
-             so we approximate a "bottom dock" with spacing + separator */
+          /* Tighten vertical whitespace; leave space for fixed touch zones */
+          .block-container { padding-top: 1.0rem; padding-bottom: 1.0rem; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -358,6 +454,9 @@ def main() -> None:
         # Keep it reasonably frequent for smoothness; gameplay speed controlled by fall interval.
         st_autorefresh(interval=120, key="tetris_tick")
 
+    # Apply any tap action first (so it feels responsive),
+    # then run gravity tick.
+    apply_query_action()
     tick_fall(time.time())
 
     top = st.columns([1, 1, 1])
@@ -368,49 +467,32 @@ def main() -> None:
     with top[2]:
         st.metric("라인", ss.lines)
 
+    top_actions = st.columns([1, 1, 1])
+    with top_actions[0]:
+        if st.button("⏹️ 일시정지/재개", use_container_width=True, disabled=ss.game_over):
+            ss.paused = not ss.paused
+    with top_actions[1]:
+        if st.button("⏬⏬ 하드드롭", use_container_width=True, disabled=ss.game_over):
+            hard_drop()
+    with top_actions[2]:
+        if st.button("🔄 재시작", use_container_width=True):
+            reset_game()
+
     if ss.game_over:
-        st.error("게임 오버! 아래에서 '재시작'을 눌러 다시 시작하세요.")
+        st.error("게임 오버! 위의 '재시작'을 눌러 다시 시작하세요.")
     elif ss.paused:
         st.info("일시정지 상태입니다.")
 
     st.markdown(render_board_html(merged_board()), unsafe_allow_html=True)
 
-    st.divider()
-
-    # Controls tuned for iPhone: big, simple, bottom-ish.
-    row1 = st.columns([1, 1, 1, 1])
-    with row1[0]:
-        if st.button("⬅️", use_container_width=True, disabled=ss.game_over):
-            try_move(-1, 0)
-    with row1[1]:
-        if st.button("➡️", use_container_width=True, disabled=ss.game_over):
-            try_move(1, 0)
-    with row1[2]:
-        if st.button("⤴️ 회전", use_container_width=True, disabled=ss.game_over):
-            try_rotate()
-    with row1[3]:
-        if st.button("⏬ 소프트", use_container_width=True, disabled=ss.game_over):
-            soft_drop()
-
-    row2 = st.columns([1, 1, 1])
-    with row2[0]:
-        if st.button("⏹️ 일시정지/재개", use_container_width=True, disabled=ss.game_over):
-            ss.paused = not ss.paused
-    with row2[1]:
-        if st.button("⏬⏬ 하드드롭", use_container_width=True, disabled=ss.game_over):
-            hard_drop()
-    with row2[2]:
-        if st.button("🔄 재시작", use_container_width=True):
-            reset_game()
+    # Fixed, large touch zones for iPhone-friendly controls.
+    st.markdown(render_touch_zones_html(), unsafe_allow_html=True)
 
     # Small helper
     with st.expander("조작 방법"):
         st.markdown(
             """
-            - **⬅️ / ➡️**: 좌/우 이동  
-            - **⤴️ 회전**: 시계방향 회전 (간단 월킥 포함)  
-            - **⏬ 소프트**: 한 칸 아래 (점수 +1)  
-            - **⏬⏬ 하드드롭**: 바닥까지 즉시 드롭 (거리만큼 가산)  
+            - **화면 하단 3구역 터치**: 왼쪽=좌이동 / 가운데=회전 / 오른쪽=우이동  
             - **라인 삭제**: 가득 찬 줄은 자동 삭제  
             - **레벨**: 10라인마다 +1 (낙하 속도 증가)
             """
