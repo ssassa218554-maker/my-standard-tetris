@@ -33,7 +33,6 @@ def rotate_cw(cells: Sequence[Tuple[int, int]]) -> List[Tuple[int, int]]:
     return [(y, -x) for (x, y) in cells]
 
 
-# Tetrominoes defined by relative 4 blocks (x, y) around an origin (0,0)
 SHAPES: Dict[str, List[Tuple[int, int]]] = {
     "I": [(-1, 0), (0, 0), (1, 0), (2, 0)],
     "J": [(-1, 0), (0, 0), (1, 0), (1, 1)],
@@ -122,35 +121,25 @@ def next_piece() -> Piece:
 
 def ensure_state() -> None:
     ss = st.session_state
-    if "board" not in ss:
-        ss.board = new_empty_board()
-    if "bag" not in ss:
-        ss.bag = refill_bag()
-    if "piece" not in ss:
-        ss.piece = None
-    if "score" not in ss:
-        ss.score = 0
-    if "lines" not in ss:
-        ss.lines = 0
-    if "level" not in ss:
-        ss.level = 1
-    if "game_over" not in ss:
-        ss.game_over = False
-    if "paused" not in ss:
-        ss.paused = False
-    if "last_fall_ts" not in ss:
-        ss.last_fall_ts = time.time()
 
-    if ss.piece is None and not ss.game_over:
-        ss.piece = next_piece()
+    # IMPORTANT: initialize only once per session (protect on reruns)
+    if "game_board" not in ss:
+        ss.game_board = new_empty_board()
+        ss.bag = refill_bag()
+        ss.current_piece = next_piece()
+        ss.score = 0
+        ss.lines = 0
+        ss.level = 1
+        ss.game_over = False
+        ss.paused = False
         ss.last_fall_ts = time.time()
 
 
 def reset_game() -> None:
     ss = st.session_state
-    ss.board = new_empty_board()
+    ss.game_board = new_empty_board()
     ss.bag = refill_bag()
-    ss.piece = next_piece()
+    ss.current_piece = next_piece()
     ss.score = 0
     ss.lines = 0
     ss.level = 1
@@ -161,38 +150,37 @@ def reset_game() -> None:
 
 def try_move(dx: int, dy: int) -> bool:
     ss = st.session_state
-    if ss.game_over or ss.paused or ss.piece is None:
+    if ss.game_over or ss.paused or ss.current_piece is None:
         return False
-    p = ss.piece
+    p = ss.current_piece
     cand = Piece(kind=p.kind, x=p.x + dx, y=p.y + dy, rot=p.rot)
-    if not collides(ss.board, cand):
-        ss.piece = cand
+    if not collides(ss.game_board, cand):
+        ss.current_piece = cand
         return True
     return False
 
 
 def try_rotate() -> bool:
     ss = st.session_state
-    if ss.game_over or ss.paused or ss.piece is None:
+    if ss.game_over or ss.paused or ss.current_piece is None:
         return False
-    p = ss.piece
+    p = ss.current_piece
     cand = Piece(kind=p.kind, x=p.x, y=p.y, rot=(p.rot + 1) % 4)
-    if not collides(ss.board, cand):
-        ss.piece = cand
+    if not collides(ss.game_board, cand):
+        ss.current_piece = cand
         return True
 
-    # Simple wall kicks (not full SRS)
     for (dx, dy) in [(-1, 0), (1, 0), (-2, 0), (2, 0), (0, -1), (-1, -1), (1, -1)]:
         kicked = Piece(kind=p.kind, x=p.x + dx, y=p.y + dy, rot=cand.rot)
-        if not collides(ss.board, kicked):
-            ss.piece = kicked
+        if not collides(ss.game_board, kicked):
+            ss.current_piece = kicked
             return True
     return False
 
 
 def hard_drop() -> None:
     ss = st.session_state
-    if ss.game_over or ss.paused or ss.piece is None:
+    if ss.game_over or ss.paused or ss.current_piece is None:
         return
     dropped = 0
     while try_move(0, 1):
@@ -204,23 +192,25 @@ def hard_drop() -> None:
 
 def step_lock_and_spawn() -> None:
     ss = st.session_state
-    if ss.piece is None:
+    if ss.current_piece is None:
         return
-    lock_piece(ss.board, ss.piece)
-    cleared = clear_lines(ss.board)
+
+    lock_piece(ss.game_board, ss.current_piece)
+    cleared = clear_lines(ss.game_board)
     if cleared:
         ss.lines += cleared
         ss.level = 1 + ss.lines // 10
         ss.score += score_for_lines(cleared, ss.level)
-    ss.piece = next_piece()
+
+    ss.current_piece = next_piece()
     ss.last_fall_ts = time.time()
-    if collides(ss.board, ss.piece):
+    if collides(ss.game_board, ss.current_piece):
         ss.game_over = True
 
 
 def tick_fall(now: float) -> None:
     ss = st.session_state
-    if ss.game_over or ss.paused or ss.piece is None:
+    if ss.game_over or ss.paused or ss.current_piece is None:
         return
     interval = fall_interval_seconds(ss.level)
     if now - ss.last_fall_ts >= interval:
@@ -231,12 +221,13 @@ def tick_fall(now: float) -> None:
 
 def merged_board() -> List[List[str]]:
     ss = st.session_state
-    b = [row[:] for row in ss.board]
-    if ss.piece is None:
+    b = [row[:] for row in ss.game_board]
+    p = ss.current_piece
+    if p is None:
         return b
-    for (x, y) in ss.piece.abs_cells():
+    for (x, y) in p.abs_cells():
         if 0 <= y < BOARD_H and 0 <= x < BOARD_W:
-            b[y][x] = ss.piece.kind
+            b[y][x] = p.kind
     return b
 
 
@@ -290,110 +281,67 @@ def render_board_html(board: List[List[str]]) -> str:
     """
 
 
-def render_touch_zones_html() -> str:
-    # Big 3-zone controls placed between scoreboard and board.
-    # Use links that set query params; Streamlit reruns on navigation.
-    return """
-    <style>
-      :root{
-        --tz-h: 26vh;
-        --tz-bg: rgba(255,255,255,0.04);
-        --tz-border: rgba(255,255,255,0.10);
-        --tz-text: rgba(255,255,255,0.35);
-      }
-      .touchbar {
-        height: var(--tz-h);
-        display: flex;
-        gap: 0px;
-        padding: 8px 6px;
-        box-sizing: border-box;
-        background: transparent;
-        -webkit-tap-highlight-color: transparent;
-        touch-action: manipulation;
-        margin: 10px 0 18px 0;
-      }
-      .zone {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        text-decoration: none;
-        border-radius: 16px;
-        border: 1px solid var(--tz-border);
-        background: var(--tz-bg);
-        color: var(--tz-text);
-        font-size: 18px;
-        font-weight: 700;
-        user-select: none;
-        -webkit-user-select: none;
-        width: 100%;
-      }
-      .zone:active {
-        background: rgba(255,255,255,0.09);
-        border-color: rgba(255,255,255,0.18);
-        color: rgba(255,255,255,0.55);
-      }
-      .zone.left  { flex: 3; }
-      .zone.mid   { flex: 4; }
-      .zone.right { flex: 3; }
-      @media (prefers-color-scheme: light) {
-        :root{
-          --tz-bg: rgba(0,0,0,0.035);
-          --tz-border: rgba(0,0,0,0.10);
-          --tz-text: rgba(0,0,0,0.35);
-        }
-      }
-    </style>
-
-    <div class="touchbar" role="group" aria-label="tetris touch controls">
-      <a class="zone left" href="?a=l" aria-label="move left">왼쪽</a>
-      <a class="zone mid" href="?a=rot" aria-label="rotate">회전</a>
-      <a class="zone right" href="?a=r" aria-label="move right">오른쪽</a>
-    </div>
-    """
-
-
-def apply_query_action() -> None:
-    try:
-        a = st.query_params.get("a")
-    except Exception:  # pragma: no cover
-        a = None
-
-    if isinstance(a, list):
-        a = a[0] if a else None
-
-    if not a:
-        return
-
-    ss = st.session_state
-    if not ss.game_over and not ss.paused:
-        if a == "l":
-            try_move(-1, 0)
-        elif a == "r":
-            try_move(1, 0)
-        elif a == "rot":
-            try_rotate()
-
-    # Clear params to prevent repeating action on autorefresh reruns.
-    try:
-        st.query_params.clear()
-    except Exception:  # pragma: no cover
-        pass
-
-
 def app_css() -> None:
+    # Make the 3-zone controls huge and faint.
     st.markdown(
         """
         <style>
           .block-container { padding-top: 1.0rem; padding-bottom: 1.0rem; }
+
+          /* Default buttons (pause/restart/drop) */
           div[data-testid="stButton"] > button {
             min-height: 48px;
             border-radius: 14px;
             font-weight: 700;
           }
+
+          /* Big touch-zone buttons */
+          .tz div[data-testid="stButton"] > button {
+            min-height: 26vh;
+            font-size: 18px;
+            border-radius: 16px;
+            background: rgba(255,255,255,0.04) !important;
+            border: 1px solid rgba(255,255,255,0.10) !important;
+            color: rgba(255,255,255,0.35) !important;
+          }
+          .tz div[data-testid="stButton"] > button:active {
+            background: rgba(255,255,255,0.09) !important;
+            border-color: rgba(255,255,255,0.18) !important;
+            color: rgba(255,255,255,0.55) !important;
+          }
+          @media (prefers-color-scheme: light) {
+            .tz div[data-testid="stButton"] > button {
+              background: rgba(0,0,0,0.035) !important;
+              border: 1px solid rgba(0,0,0,0.10) !important;
+              color: rgba(0,0,0,0.35) !important;
+            }
+          }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_touch_zones() -> None:
+    ss = st.session_state
+    disabled = ss.game_over or ss.paused
+
+    cols = st.columns([3, 4, 3], gap="small")
+    with cols[0]:
+        st.markdown("<div class='tz'>", unsafe_allow_html=True)
+        if st.button("왼쪽", key="tz_left", use_container_width=True, disabled=disabled):
+            try_move(-1, 0)
+        st.markdown("</div>", unsafe_allow_html=True)
+    with cols[1]:
+        st.markdown("<div class='tz'>", unsafe_allow_html=True)
+        if st.button("회전", key="tz_rot", use_container_width=True, disabled=disabled):
+            try_rotate()
+        st.markdown("</div>", unsafe_allow_html=True)
+    with cols[2]:
+        st.markdown("<div class='tz'>", unsafe_allow_html=True)
+        if st.button("오른쪽", key="tz_right", use_container_width=True, disabled=disabled):
+            try_move(1, 0)
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 def main() -> None:
@@ -411,8 +359,6 @@ def main() -> None:
     else:
         st_autorefresh(interval=120, key="tetris_tick")
 
-    # Apply any tap action first (responsive feel), then gravity tick.
-    apply_query_action()
     tick_fall(time.time())
 
     top = st.columns([1, 1, 1])
@@ -423,10 +369,10 @@ def main() -> None:
     with top[2]:
         st.metric("라인", ss.lines)
 
-    # Place controls here: 바로 아래(점수/레벨판 아래) + 게임판 위
-    st.markdown(render_touch_zones_html(), unsafe_allow_html=True)
+    # Controls: scoreboard 바로 아래 + 게임판 위
+    render_touch_zones()
 
-    # Extra gap between controls and board to avoid mis-taps.
+    # Gap between controls and board (avoid mis-taps)
     st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
 
     if ss.game_over:
@@ -452,7 +398,8 @@ def main() -> None:
     with st.expander("조작 방법"):
         st.markdown(
             """
-            - **조작 3구역 터치**: 왼쪽=좌이동 / 가운데=회전 / 오른쪽=우이동  
+            - **3구역 터치**: 왼쪽=좌이동 / 가운데=회전 / 오른쪽=우이동  
+            - **일시정지 상태**에서는 조작이 잠깁니다.  
             - **라인 삭제**: 가득 찬 줄은 자동 삭제  
             - **레벨**: 10라인마다 +1 (낙하 속도 증가)
             """
